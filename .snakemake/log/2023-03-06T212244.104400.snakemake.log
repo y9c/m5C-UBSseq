@@ -1,3 +1,0 @@
-KeyError in file /Users/yec/Projects/m5C-UBSseq/Snakefile, line 11:
-'batch'
-  File "/Users/yec/Projects/m5C-UBSseq/Snakefile", line 11, in <module>

@@ -1,8 +1,0 @@
-Building DAG of jobs...
-MissingInputException in rule join_pairend_reads in file /Users/yec/Projects/m5C-UBSseq/Snakefile, line 57:
-Missing input files for rule join_pairend_reads:
-    output: merged_reads/DMSO-rep1_run1.fq.gz, merged_reads/DMSO-rep1_run1.un1.fq.gz, merged_reads/DMSO-rep1_run1.un2.fq.gz
-    wildcards: sample=DMSO-rep1, rn=run1
-    affected files:
-        /Users/yec/rawdata/221226_A00639_1468_AHNMLMDRX2-CHe-ZZ-43S/CHe-ZZ-43S-s01_S18_R2_001.fastq.gz
-        /Users/yec/rawdata/221226_A00639_1468_AHNMLMDRX2-CHe-ZZ-43S/CHe-ZZ-43S-s01_S18_R1_001.fastq.gz
