@@ -5,6 +5,8 @@ min_version("7.0")
 
 
 configfile: "config.yaml"
+
+
 workdir: "workspace"
 
 
@@ -16,8 +18,6 @@ STRANDNESS = "F"
 REF = config[f"ref_{SPECIES}"]
 REFTYPES = ["genes", "genome", "contamination"]
 REFTYPES_CALL = ["genes", "genome"]
-
-
 
 
 read_ids = ["R1", "R2"]
@@ -43,7 +43,6 @@ rule all:
         "report_qc/report_falco_after.html",
         expand("stat_reads/trimming/{sample}.tsv", sample=sample2data.keys()),
         expand("stat_reads/mapping/{sample}.tsv", sample=sample2data.keys()),
-        "count_reads/genome_single.count",
         expand(
             "calculated_rate/{ref}_{is_filtered}.tsv.gz",
             ref=REFTYPES_CALL,
@@ -516,7 +515,7 @@ rule hisat2_3n_mapping_contamination:
         summary="run_mapping_SE/{sample}_{rn}.contamination.summary",
     params:
         hisat3n=config["path"]["hisat3n"],
-        index=config["ref_contamination"]["hisat3n"],
+        index=REF["contamination"]["hisat3n"],
         mapping="--directional-mapping"
         if STRANDNESS == "F"
         else "--directional-mapping-reverse"
@@ -606,7 +605,7 @@ rule hisat2_3n_mapping_contamination_PE:
     params:
         un="run_unmapped_PE/{sample}_{rn}_R%.contamination.fq.gz",
         hisat3n=config["path"]["hisat3n"],
-        index=config["ref_contamination"]["hisat3n"],
+        index=REF["contamination"]["hisat3n"],
         mapping="--directional-mapping"
         if STRANDNESS == "F"
         else "--directional-mapping-reverse"
@@ -794,24 +793,6 @@ rule dedup_index:
         """
         samtools index -@ {threads} {input}
         """
-
-
-## gene expression
-
-
-rule count_genome_single:
-    input:
-        expand("dedup_mapping/{sample}.genome.bam", sample=sample2data.keys()),
-    output:
-        "count_reads/genome_single.count",
-    params:
-        gtf=REF["genome"]["gtf"],
-        name="gene_name"
-    threads: 24
-    resources:
-        mem_mb=48000,
-    shell:
-        "featureCounts -T {threads} -O --largestOverlap -t exon -g {params.name} -a {params.gtf} -o {output} {input}"
 
 
 ########

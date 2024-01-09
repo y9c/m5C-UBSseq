@@ -2,25 +2,16 @@ data_dir: ../data
 ref_dir: ../ref
 src_dir: ../src
 
-ref_contamination:
-  fa: ~/reference/genome/contamination/contamination.fa
-  bowtie2: ~/reference/index/bowtie2/contamination
-  hisat3n: ~/reference/index/hisat3n/contamination/contamination
-
 ref_GRCh38:
-  genome:
-    fa: ~/reference/genome/Homo_sapiens.GRCh38.genome.fa
-    fai: ~/reference/genome/Homo_sapiens.GRCh38.genome.fa.fai
-    gtf: ~/reference/feature/Homo_sapiens.GRCh38.genome.gtf
-    star: ~/reference/index/star/Homo_sapiens.GRCh38.genome
-    bismark: ~/reference/index/bismark/Homo_sapiens.GRCh38.genome
-    hisat3n: ~/reference/index/hisat3n/Homo_sapiens.GRCh38.genome/Homo_sapiens.GRCh38.genome
-    hisat2: ~/reference/index/hisat2/Homo_sapiens.GRCh38.genome/genome_snp_rep
-    gtf_collapse: ~/reference/feature/Homo_sapiens.GRCh38.genome.collapse.gtf
+  contamination:
+    fa: ~/reference/genome/contamination/contamination.fa
+    hisat3n: ~/reference/index/hisat3n/contamination/contamination
   genes:
     fa: ~/reference/genome/Homo_sapiens.GRCh38.sncRNA.fa
-    bowtie2: ~/reference/index/bowtie2/Homo_sapiens.GRCh38.sncRNA
     hisat3n: ~/reference/index/hisat3n/Homo_sapiens.GRCh38.sncRNA/Homo_sapiens.GRCh38.sncRNA
+  genome:
+    fa: ~/reference/genome/Homo_sapiens.GRCh38.genome.fa
+    hisat3n: ~/reference/index/hisat3n/Homo_sapiens.GRCh38.genome/Homo_sapiens.GRCh38.genome
 
 samples:
   DMSO-rep1:
