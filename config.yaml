@@ -9,12 +9,25 @@ reference:
     fa: ~/reference/genome/Homo_sapiens.GRCh38.genome.fa
     hisat3n: ~/reference/index/hisat3n/Homo_sapiens.GRCh38.genome/Homo_sapiens.GRCh38.genome
 
+# Sample name should be indentical and listed in the 2nd level of the yaml file
+# Each sample will be analysis seperately, but
+# samples sharing the same group id will be regared as biological replicates and combined in the comparing step 
 samples:
-  DMSO-rep1:
+  CONTROL-rep1:
     data:
       - R1: ../data/test1_R1.fq.gz
         R2: ../data/test1_R2.fq.gz
-    group: DMSO
+    group: CONTROL
+  DRUG-rep1:
+    data:
+      - R1: ../data/test2_R1.fq.gz
+        R2: ../data/test2_R2.fq.gz
+    group: DRUG
+  DRUG-rep2:
+    data:
+      - R1: ../data/test3_R1.fq.gz
+        R2: ../data/test3_R2.fq.gz
+    group: DRUG
 
 data_dir: ../data
 ref_dir: ../ref
