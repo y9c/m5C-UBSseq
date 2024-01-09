@@ -10,12 +10,14 @@ configfile: "config.yaml"
 workdir: "workspace"
 
 
-CUSTOMIZED_GENES = []
-BATCH = "inhibitor-AzaC"
+# change this one to your own
 SPECIES = "GRCh38"
+
+
+CUSTOMIZED_GENES = []
 LIBRARY_STRATEGY = "INLINE"
 STRANDNESS = "F"
-REF = config[f"ref_{SPECIES}"]
+REF = config["reference"]
 REFTYPES = ["genes", "genome", "contamination"]
 REFTYPES_CALL = ["genes", "genome"]
 
@@ -24,7 +26,7 @@ read_ids = ["R1", "R2"]
 pairend_run_ids = []
 sample2data = defaultdict(dict)
 group2sample = defaultdict(list)
-for s, v in config[f"samples"].items():
+for s, v in config["samples"].items():
     # picked treated samples only
     # if "treated" in s:
     if v.get("treated", True):

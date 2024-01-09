@@ -1,8 +1,4 @@
-data_dir: ../data
-ref_dir: ../ref
-src_dir: ../src
-
-ref_GRCh38:
+reference:
   contamination:
     fa: ~/reference/genome/contamination/contamination.fa
     hisat3n: ~/reference/index/hisat3n/contamination/contamination
@@ -19,3 +15,7 @@ samples:
       - R1: ../data/test1_R1.fq.gz
         R2: ../data/test1_R2.fq.gz
     group: DMSO
+
+data_dir: ../data
+ref_dir: ../ref
+src_dir: ../src
