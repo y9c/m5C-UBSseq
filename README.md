@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/589094213.svg](https://zenodo.org/doi/10.5281/zenodo.11046884))
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.11046885.svg)](https://doi.org/10.5281/zenodo.11046885)
 
 # m<sup>5</sup>C-UBSseq
 
@@ -49,4 +49,3 @@ Copyright &copy; 2021-present
 <a href="https://github.com/y9c" target="_blank">Chang Y</a>
 </p>
 <p align="center">
-```
