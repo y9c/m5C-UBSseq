@@ -1,431 +1,116 @@
 from snakemake.utils import min_version
 from collections import defaultdict
+from pathlib import Path
 
-min_version("7.0")
+min_version("8.0")
 
 
-configfile: "config.yaml"
+configfile: Path(workflow.basedir) / "config.yaml"
 
 
 workdir: "workspace"
 
 
-# change this one to your own
-SPECIES = "GRCh38"
-
-
-CUSTOMIZED_GENES = []
-LIBRARY_STRATEGY = "INLINE"
-STRANDNESS = "F"
+BIN = config["path"]
 REF = config["reference"]
-REFTYPES = ["genes", "genome", "contamination"]
-REFTYPES_CALL = ["genes", "genome"]
+
+CUSTOMIZED_GENES = [os.path.expanduser(i) for i in config.get("customized_genes", [])]
+WITH_UMI = config.get("library", "") in ["INLINE", "TAKARAV3"]
+MARKDUP = config.get("markdup", False)
 
 
-read_ids = ["R1", "R2"]
-pairend_run_ids = []
-sample2data = defaultdict(dict)
-group2sample = defaultdict(list)
+SAMPLE2DATA = defaultdict(dict)
+SAMPLE2LIB = defaultdict(dict)
+GROUP2SAMPLE = defaultdict(list)
 for s, v in config["samples"].items():
-    # picked treated samples only
-    # if "treated" in s:
     if v.get("treated", True):
-        group2sample[v["group"]].append(s)
-    for i, v2 in enumerate(v["data"], 1):
+        # set default group as sample name, if not specified
+        GROUP2SAMPLE[v.get("group", s)].append(s)
+    SAMPLE2LIB[s] = v.get("library", config.get("library", ""))
+    for i, v2 in enumerate(v.get("data", []), 1):
         r = f"run{i}"
-        sample2data[s][r] = {k3: os.path.expanduser(v3) for k3, v3 in v2.items()}
-        if len(v2) == 2:
-            pairend_run_ids.append(s + "_" + r)
+        SAMPLE2DATA[s][r] = {k3: os.path.expanduser(v3) for k3, v3 in v2.items()}
+
+
+INTERNALDIR = Path("internal_files")
+TEMPDIR = Path(".tmp")
+
+if os.environ.get("TMPDIR") is None:
+    os.environ["TMPDIR"] = str(TEMPDIR)
+
+
+envvars:
+    "TMPDIR",
 
 
 rule all:
     input:
-        "report_qc/cutadapt_qc.html",
-        "report_qc/cutadaptPE_qc.html" if len(pairend_run_ids) > 0 else [],
-        "report_qc/report_falco_after.html",
-        expand("stat_reads/trimming/{sample}.tsv", sample=sample2data.keys()),
-        expand("stat_reads/mapping/{sample}.tsv", sample=sample2data.keys()),
+        expand("report_reads/mapped/{sample}.tsv", sample=SAMPLE2DATA.keys()),
+        [
+            (
+                INTERNALDIR / f"discarded_reads/{sample}_{rn}_R1.unmapped.fq.gz"
+                if len(v) == 1
+                else [
+                    INTERNALDIR / f"discarded_reads/{sample}_{rn}_R1.unmapped.fq.gz",
+                    INTERNALDIR / f"discarded_reads/{sample}_{rn}_R2.unmapped.fq.gz",
+                ]
+            )
+            for sample, v in SAMPLE2DATA.items()
+            for rn, v2 in v.items()
+        ],
         expand(
-            "calculated_rate/{ref}_{is_filtered}.tsv.gz",
-            ref=REFTYPES_CALL,
-            is_filtered=["filtered", "unfiltered"],
+            "detected_sites/filtered/{sample}.{ref}.tsv",
+            sample=SAMPLE2DATA.keys(),
+            ref=["genes", "genome"],
         ),
-        expand("filtered_table/{ref}.tsv.gz", ref=REFTYPES_CALL),
+        # expand("prefilter_sites_combined/{ref}.tsv", ref=["genes", "genome"]),
 
 
-# fastq-join do not work very well with adpter reads
-# fastp is better
-rule join_pairend_reads:
-    input:
-        lambda wildcards: sample2data[wildcards.sample][wildcards.rn].values(),
-    output:
-        join=temp("merged_reads/{sample}_{rn}.fq.gz"),
-        un1=temp("merged_reads/{sample}_{rn}.un1.fq.gz"),
-        un2=temp("merged_reads/{sample}_{rn}.un2.fq.gz"),
-    params:
-        html=temp("merged_reads/{sample}_{rn}.fastp.html"),
-        json=temp("merged_reads/{sample}_{rn}.fastp.json"),
-    threads: 12
-    resources:
-        mem_mb=48000,
-    run:
-        if len(input) == 2:
-            shell(
-                """
-        fastp --thread {threads} --merge --correction --overlap_len_require 10 --overlap_diff_percent_limit 20 -i {input[0]} -I {input[1]} --merged_out {output.join} --out1 {output.un1} --out2 {output.un2} -h {params.html} -j {params.json}
-        """
-            )
-        else:
-            shell(
-                """
-        ln -sf {input[0]} {output[0]}
-        touch {output[1]}
-        touch {output[2]}
-        """
-            )
-
-
-# cut SE
+# cut adapter
 
 
 rule cutadapt_SE:
     input:
-        "merged_reads/{sample}_{rn}.fq.gz",
+        lambda wildcards: SAMPLE2DATA[wildcards.sample][wildcards.rn].get("R1", "/"),
     output:
-        fastq_cut="cut_adapter_SE/{sample}_{rn}.fq.gz",
-        fastq_tooshort="cut_adapter_SE/{sample}_{rn}.tooshort.fq.gz",
-        fastq_untrimmed="cut_adapter_SE/{sample}_{rn}.untrimmed.fq.gz"
-        if LIBRARY_STRATEGY in ["INLINE"]
-        else [],
-        report1="cut_adapter_SE/{sample}_{rn}.cutadapt.step1.report",
-        report2="cut_adapter_SE/{sample}_{rn}.cutadapt.step2.report",
+        fastq_cut=temp(TEMPDIR / "cut_adapter_SE/{sample}_{rn}_R1.fq.gz"),
+        fastq_tooshort=INTERNALDIR / "discarded_reads/{sample}_{rn}_R1.tooshort.fq.gz",
+        fastq_untrimmed=INTERNALDIR / "discarded_reads/{sample}_{rn}_R1.untrimmed.fq.gz",
+        report="report_reads/trimming/{sample}_{rn}.json",
     params:
-        # with inline barcode
-        barcode3=config["adapter"]["barcode3"],
-        adapter3=config["adapter"]["adapter3"],
-    threads: 12
-    resources:
-        mem_mb=48000,
-    run:
-        if LIBRARY_STRATEGY == "INLINE":
-            # INLINE, double ligation method
-            # WARNING: deal with NEB SMALLRNA kit in this chunk, but I should not use this method
-            # p5 - 5ntUMI - insert - 5ntUMI - 6nt inline barcode - p7
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.barcode3}{params.adapter3};e=0.15;o=6;anywhere;" \
-            --untrimmed-output={output.fastq_untrimmed} \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 5 -u -5 \
-            --rename='{{id}}_{{cut_prefix}}{{cut_suffix}} {{comment}}' \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort} \
-            -o {output.fastq_cut} - >{output.report2}
-        """
-            )
-        elif LIBRARY_STRATEGY == "TAKARAV3":
-            # p5 - 14nttUMI - reverse insert - p7
-            shell(
-                """
-        seqtk seq {input} | \
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter3};anywhere;o=4;e=0.15" \
-            -o - - 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u -14 \
-            --rename='{{id}}_{{cut_suffix}} {{comment}}' \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort} \
-            -o {output.fastq_cut} - >{output.report2}
-        """
-            )
-        elif LIBRARY_STRATEGY == "SWIFT":
-            # p5 - [might be 6bp of polyC] - reverse insert (cDNA) - adaptase tail (CCCCCC) - p7
-            # 6nt of polyG in 5' of R1 might from random RT primer
-            # adaptase tail can be as long as 15bp at the 5' of R2 of polyG)
-            # no UMI, but try to use random polyC tail as UMI
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter3};e=0.15;o=4;anywhere" \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 6 -u -15 \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort} \
-            -o {output.fastq_cut} - >{output.report2}
-        """
-            )
-        elif LIBRARY_STRATEGY == "STRANDED":
-            # VAHTS Stranded mRNA-seq Library Prep Kit
-            # KAPA Stranded mRNA-Seq Kit (KAPA)
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter3};e=0.15;o=4;anywhere" \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 2 -u -6 \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort} \
-            -o {output.fastq_cut} - >{output.report2}
-        """
-            )
-        else:
-            # Small RNA, double ligation method, without barcode
-            # p5 - insert - p7
-            # trim 2nt on both end to increase quality
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter3};e=0.15;o=6;anywhere;" \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 2 -u -2 \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort} \
-            -o {output.fastq_cut} - >{output.report2}
-        """
-            )
-
-
-rule report_cutadapt_SE:
-    input:
-        lambda wildcards: [
-            f"cut_adapter_SE/{s}_{r}.cutadapt.step2.report"
-            for s, v in sample2data.items()
-            for r in v.keys()
-        ],
-    output:
-        "report_qc/cutadapt_qc.html",
+        library=lambda wildcards: SAMPLE2LIB[wildcards.sample],
+    threads: 20
     shell:
-        "multiqc -f -m cutadapt -n {output} {input}"
-
-
-# cut PE
-# The libraries of TAKARA v3 KIT is too long, so there is too much unjoined reads.
-# run in PE mode to save the reads
+        """
+        cutseq -t {threads} -A {params.library} -m 20 --trim-polyA --ensure-inline-barcode --auto-rc -o {output.fastq_cut} -s {output.fastq_tooshort} -u {output.fastq_untrimmed} --json-file {output.report} {input} 
+        """
 
 
 rule cutadapt_PE:
     input:
-        "merged_reads/{sample}_{rn}.un1.fq.gz",
-        "merged_reads/{sample}_{rn}.un2.fq.gz",
+        lambda wildcards: SAMPLE2DATA[wildcards.sample][wildcards.rn].get("R1", "/"),
+        lambda wildcards: SAMPLE2DATA[wildcards.sample][wildcards.rn].get("R2", "/"),
     output:
-        fastq_cut1="cut_adapter_PE/{sample}_{rn}_R1.fq.gz",
-        fastq_cut2="cut_adapter_PE/{sample}_{rn}_R2.fq.gz",
-        fastq_tooshort1="cut_adapter_PE/{sample}_{rn}_R1.tooshort.fq.gz",
-        fastq_tooshort2="cut_adapter_PE/{sample}_{rn}_R2.tooshort.fq.gz",
-        fastq_untrimmed1="cut_adapter_PE/{sample}_{rn}_R1.untrimmed.fq.gz"
-        if LIBRARY_STRATEGY == "INLINE"
-        else [],
-        fastq_untrimmed2="cut_adapter_PE/{sample}_{rn}_R2.untrimmed.fq.gz"
-        if LIBRARY_STRATEGY == "INLINE"
-        else [],
-        report1="cut_adapter_PE/{sample}_{rn}.cutadapt.step1.report",
-        report2="cut_adapter_PE/{sample}_{rn}.cutadapt.step2.report",
-    params:
-        # with inline barcode
-        barcode3=config["adapter"]["barcode3"],
-        adapter_r1=config["adapter"]["smallRNA_r1"]
-        if LIBRARY_STRATEGY == "SMALLRNA"
-        else config["adapter"]["truseq_r1"],
-        adapter_r2=config["adapter"]["smallRNA_r2"]
-        if LIBRARY_STRATEGY in ["INLINE", "SMALLRNA"]
-        else config["adapter"]["truseq_r2"],
-    threads: 12
-    resources:
-        mem_mb=48000,
-    run:
-        if LIBRARY_STRATEGY == "INLINE":
-            # INLINE, double ligation method
-            # WARNING: deal with NEB SMALLRNA kit in this chunk, but I should not use this method
-            # p5 - 5ntUMI - insert - 5ntUMI - 6nt inline barcode - p7
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.barcode3}{params.adapter_r1};e=0.15;o=6;anywhere;" \
-            -A "{params.adapter_r2};e=0.15;o=6;anywhere;" \
-            --untrimmed-output={output.fastq_untrimmed1} --untrimmed-paired-output={output.fastq_untrimmed2} \
-            --interleaved \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 5 -U 5 \
-            --rename='{{id}}_{{r1.cut_prefix}}{{r2.cut_prefix}} {{comment}}' \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort1} --too-short-paired-output={output.fastq_tooshort2} \
-            --interleaved \
-            -o {output.fastq_cut1} -p {output.fastq_cut2} - >{output.report2}
-        """
-            )
-        if LIBRARY_STRATEGY == "TAKARAV3":
-            # p5 - 14ntUMI - reverse insert - p7
-            # NOTE: do not need to cut interleaved (-U -14), because both reads do not overlap
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter_r1};anywhere;o=4;e=0.15" \
-            -A "{params.adapter_r2};anywhere;o=4;e=0.15" \
-            --interleaved \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -U 14 \
-            --rename='{{id}}_{{r2.cut_prefix}} {{comment}}' \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort1} --too-short-paired-output={output.fastq_tooshort2} \
-            --interleaved \
-            -o {output.fastq_cut1} -p {output.fastq_cut2} - >{output.report2}
-        """
-            )
-        elif LIBRARY_STRATEGY == "SWIFT":
-            # p5 - [might be 6bp of polyC] - reverse insert (cDNA) - adaptase tail (CCCCCC) - p7
-            # 6nt of polyG in 5' of R1 might from random RT primer
-            # adaptase tail can be as long as 15bp at the 5' of R2 of polyG)
-            # no UMI, but try to use random polyC tail as UMI
-            # NOTE: do not need to cut interleaved, because both reads do not overlap
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter_r1};anywhere;o=4;e=0.15" \
-            -A "{params.adapter_r2};anywhere;o=4;e=0.15" \
-            --interleaved \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 6 -U 15 \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort1} --too-short-paired-output={output.fastq_tooshort2} \
-            --interleaved \
-            -o {output.fastq_cut1} -p {output.fastq_cut2} - >{output.report2}
-        """
-            )
-        elif LIBRARY_STRATEGY == "STRANDED":
-            # INLINE, double ligation method
-            # WARNING: deal with NEB SMALLRNA kit in this chunk, but I should not use this method
-            # p5 - 5ntUMI - insert - 5ntUMI - 6nt inline barcode - p7
-            # NOTE: do not need to cut interleaved, because both reads do not overlap
-            # cut 2nt for quality
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.barcode3}{params.adapter_r1};e=0.15;o=6;anywhere;" \
-            -A "{params.adapter_r2};e=0.15;o=6;anywhere;" \
-            --untrimmed-output={output.fastq_untrimmed1} --untrimmed-paired-output={output.fastq_untrimmed2} \
-            --interleaved \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 2 -u -2 -U 5 -U -2 \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort1} --too-short-paired-output={output.fastq_tooshort2} \
-            --interleaved \
-            -o {output.fastq_cut1} -p {output.fastq_cut2} - >{output.report2}
-        """
-            )
-        else:
-            # Small RNA, double ligation method, without barcode
-            # p5 - insert - p7
-            # trim 2nt on both end to increase quality
-            shell(
-                """
-        cutadapt -j {threads} \
-            -n 2 \
-            -a "{params.adapter_r1};e=0.15;o=6;anywhere;" \
-            -A "{params.adapter_r2};e=0.15;o=6;anywhere;" \
-            --interleaved \
-            -o - {input} 2>{output.report1} | \
-        cutadapt -j {threads} \
-            -u 2 -u -2 -U 2 -U -2 \
-            --max-n=0 \
-            -q 15 \
-            --nextseq-trim=15 \
-            -m 20 \
-            --too-short-output={output.fastq_tooshort1} --too-short-paired-output={output.fastq_tooshort2} \
-            --interleaved \
-            -o {output.fastq_cut1} -p {output.fastq_cut2} - >{output.report2}
-        """
-            )
-
-
-rule report_cutadapt_PE:
-    input:
-        lambda wildcards: [
-            f"cut_adapter_PE/{s}_{r}.cutadapt.step2.report"
-            for s, v in sample2data.items()
-            for r in v.keys()
+        fastq_cut=[
+            temp(TEMPDIR / "cut_adapter_PE/{sample}_{rn}_R1.fq.gz"),
+            temp(TEMPDIR / "cut_adapter_PE/{sample}_{rn}_R2.fq.gz"),
         ],
-    output:
-        "report_qc/cutadaptPE_qc.html",
-    shell:
-        "multiqc -f -m cutadapt -n {output} {input}"
-
-
-# trimmed part qc
-
-
-rule falco_after:
-    input:
-        "cut_adapter_SE/{sample}_{rn}.fq.gz",
-    output:
-        html="quality_control/falco_after/{sample}_{rn}/fastqc_report.html",
-        text="quality_control/falco_after/{sample}_{rn}/fastqc_data.txt",
-        summary="quality_control/falco_after/{sample}_{rn}/summary.txt",
-    params:
-        "quality_control/falco_after/{sample}_{rn}",
-    shell:
-        "falco -o {params} {input}"
-
-
-rule report_falco_after:
-    input:
-        lambda wildcards: [
-            f"quality_control/falco_after/{s}_{r}/fastqc_data.txt"
-            for s, v in sample2data.items()
-            for r in v.keys()
+        fastq_tooshort=[
+            INTERNALDIR / "discarded_reads/{sample}_{rn}_R1.tooshort.fq.gz",
+            INTERNALDIR / "discarded_reads/{sample}_{rn}_R2.tooshort.fq.gz",
         ],
-    output:
-        "report_qc/report_falco_after.html",
-    threads: 2
-    resources:
-        mem_mb=8000,
+        fastq_untrimmed=[
+            INTERNALDIR / "discarded_reads/{sample}_{rn}_R1.untrimmed.fq.gz",
+            INTERNALDIR / "discarded_reads/{sample}_{rn}_R2.untrimmed.fq.gz",
+        ],
+        report="report_reads/trimming/{sample}_{rn}.report",
+    params:
+        library=lambda wildcards: SAMPLE2LIB[wildcards.sample],
+    threads: 20
     shell:
-        "multiqc -f -m fastqc -n {output} {input}"
+        """
+        cutseq -t {threads} -A {params.library} -m 20 --trim-polyA --ensure-inline-barcode --auto-rc -o {output.fastq_cut} -s {output.fastq_tooshort} -u {output.fastq_untrimmed} --json-file {output.report} {input} 
+        """
 
 
 # prepare genes index
@@ -442,8 +127,6 @@ rule prepare_genes_index:
     params:
         index="prepared_genes/genes",
     threads: 12
-    resources:
-        mem_mb=56000,
     shell:
         """
         cat {input} >{output.fa}
@@ -452,397 +135,352 @@ rule prepare_genes_index:
         """
 
 
-# hisat2-3N (SE mapping mode)
-
-
-rule hisat2_3n_mapping_genes:
+rule build_gene_index:
     input:
-        "cut_adapter_SE/{sample}_{rn}.fq.gz",
+        fa="prepared_genes/genes.fa",
+    output:
+        fai="prepared_genes/genes.fa.fai",
+    shell:
+        """
+        samtools faidx {output.fa}
+        """
+
+
+rule generate_saf_gene:
+    input:
+        fai="prepared_genes/genes.fa.fai",
+    output:
+        saf="prepared_genes/genes.saf",
+    shell:
+        """
+        awk 'BEGIN{{OFS="\\t"}}{{print $1,$1,0,$2,"+"}}' {input} > {output}
+        """
+
+
+################################
+# Mapping (SE mapping mode)
+################################
+
+
+rule hisat2_3n_mapping_contamination_SE:
+    input:
+        TEMPDIR / "cut_adapter_SE/{sample}_{rn}_R1.fq.gz",
+    output:
+        mapped=temp(TEMPDIR / "mapping_unsorted_SE/{sample}_{rn}.contamination.bam"),
+        unmapped=temp(TEMPDIR / "mapping_discarded_SE/{sample}_{rn}.contamination.bam"),
+        summary="report_reads/mapping/{sample}_{rn}.contamination.summary",
+    params:
+        index=REF["contamination"]["hisat3n"],
+    threads: 24
+    shell:
+        """
+        {BIN[hisat3n]} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -U {input[0]} --directional-mapping --base-change C,T --mp 8,2 --no-spliced-alignment | \
+            {BIN[samtools]} view -@ {threads} -e '!flag.unmap' -O BAM -U {output.unmapped} -o {output.mapped}
+        """
+
+
+rule hisat2_3n_mapping_genes_SE:
+    input:
+        TEMPDIR / "unmapped_internal_SE/{sample}_{rn}_R1.contamination.fq.gz",
         "prepared_genes/genes.3n.CT.1.ht2" if CUSTOMIZED_GENES else [],
     output:
-        sam=temp("run_mapping_SE/{sample}_{rn}.genes.sam"),
-        fq=temp("run_mapping_SE/{sample}_{rn}.genes.fq"),
-        summary="run_mapping_SE/{sample}_{rn}.genes.summary",
+        mapped=temp(TEMPDIR / "mapping_unsorted_SE/{sample}_{rn}.genes.bam"),
+        unmapped=temp(TEMPDIR / "mapping_discarded_SE/{sample}_{rn}.genes.bam"),
+        summary="report_reads/mapping/{sample}_{rn}.genes.summary",
     params:
-        hisat3n=config["path"]["hisat3n"],
-        index=REF["genes"]["hisat3n"]
-        if not CUSTOMIZED_GENES
-        else "prepared_genes/genes",
-        mapping="--directional-mapping"
-        if STRANDNESS == "F"
-        else "--directional-mapping-reverse"
-        if STRANDNESS == "R"
-        else "",
+        index=(
+            REF["genes"]["hisat3n"] if not CUSTOMIZED_GENES else "prepared_genes/genes"
+        ),
     threads: 24
-    resources:
-        mem_mb=56000,
     shell:
         """
-        export TMPDIR="/scratch/midway3/yec"
-        {params.hisat3n} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -U {input[0]} {params.mapping} --all --norc --base-change C,T --mp 8,2 --no-spliced-alignment --un {output.fq} -S {output.sam}
+        {BIN[hisat3n]} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -U {input[0]} --directional-mapping --all --norc --base-change C,T --mp 8,2 --no-spliced-alignment | \
+            {BIN[samtools]} view -@ {threads} -e '!flag.unmap' -O BAM -U {output.unmapped} -o {output.mapped}
         """
 
 
-rule hisat2_3n_mapping_genome:
+rule hisat2_3n_mapping_genome_SE:
     input:
-        "run_mapping_SE/{sample}_{rn}.genes.fq",
+        TEMPDIR / "unmapped_internal_SE/{sample}_{rn}_R1.genes.fq.gz",
     output:
-        sam=temp("run_mapping_SE/{sample}_{rn}.genome.sam"),
-        fq=temp("run_mapping_SE/{sample}_{rn}.genome.fq"),
-        summary="run_mapping_SE/{sample}_{rn}.genome.summary",
+        mapped=temp(TEMPDIR / "mapping_unsorted_SE/{sample}_{rn}.genome.bam"),
+        unmapped=temp(TEMPDIR / "mapping_discarded_SE/{sample}_{rn}.genome.bam"),
+        summary="report_reads/mapping/{sample}_{rn}.genome.summary",
     params:
-        hisat3n=config["path"]["hisat3n"],
         index=REF["genome"]["hisat3n"],
-        mapping="--directional-mapping"
-        if STRANDNESS == "F"
-        else "--directional-mapping-reverse"
-        if STRANDNESS == "R"
-        else "",
     threads: 24
-    resources:
-        mem_mb=56000,
     shell:
         """
-        export TMPDIR="/scratch/midway3/yec"
-        {params.hisat3n} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -U {input[0]} {params.mapping} --base-change C,T --pen-noncansplice 20 --mp 4,1 --un {output.fq} -S {output.sam}
+        {BIN[hisat3n]} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -U {input[0]} --directional-mapping --base-change C,T --pen-noncansplice 20 --mp 4,1 | \
+            {BIN[samtools]} view -@ {threads} -e '!flag.unmap' -O BAM -U {output.unmapped} -o {output.mapped}
         """
 
 
-rule hisat2_3n_mapping_contamination:
+rule extract_unmap_bam_internal_SE:
     input:
-        "run_mapping_SE/{sample}_{rn}.genome.fq",
+        TEMPDIR / "mapping_discarded_SE/{sample}_{rn}.{reftype}.bam",
     output:
-        sam=temp("run_mapping_SE/{sample}_{rn}.contamination.sam"),
-        fqz="run_unmapped/{sample}_{rn}.contamination.fq.gz",
-        summary="run_mapping_SE/{sample}_{rn}.contamination.summary",
-    params:
-        hisat3n=config["path"]["hisat3n"],
-        index=REF["contamination"]["hisat3n"],
-        mapping="--directional-mapping"
-        if STRANDNESS == "F"
-        else "--directional-mapping-reverse"
-        if STRANDNESS == "R"
-        else "",
-    threads: 24
-    resources:
-        mem_mb=56000,
+        temp(TEMPDIR / "unmapped_internal_SE/{sample}_{rn}_R1.{reftype}.fq.gz"),
+    threads: 4
     shell:
         """
-        export TMPDIR="/scratch/midway3/yec"
-        {params.hisat3n} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -U {input[0]} {params.mapping} --base-change C,T --mp 8,2 --no-spliced-alignment --un-gz {output.fqz} -S {output.sam}
+        {BIN[samtools]} fastq -@ {threads} -0 {output} {input}
         """
 
 
-# hisat2-3N (PE mapping mode)
+################################
+# Mapping (PE mapping mode)
+################################
+
+
+rule hisat2_3n_mapping_contamination_PE:
+    input:
+        TEMPDIR / "cut_adapter_PE/{sample}_{rn}_R1.fq.gz",
+        TEMPDIR / "cut_adapter_PE/{sample}_{rn}_R2.fq.gz",
+    output:
+        mapped=temp(TEMPDIR / "mapping_unsorted_PE/{sample}_{rn}.contamination.bam"),
+        unmapped=temp(TEMPDIR / "mapping_discarded_PE/{sample}_{rn}.contamination.bam"),
+        summary="report_reads/mapping/{sample}_{rn}.contamination.summary",
+    params:
+        index=REF["contamination"]["hisat3n"],
+    threads: 24
+    shell:
+        """
+        {BIN[hisat3n]} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -1 {input[0]} -2 {input[1]} --directional-mapping --base-change C,T --mp 8,2 --no-spliced-alignment | \
+            {BIN[samtools]} view -@ {threads} -e 'flag.proper_pair && !flag.unmap && !flag.munmap' -O BAM -U {output.unmapped} -o {output.mapped}
+        """
 
 
 rule hisat2_3n_mapping_genes_PE:
     input:
-        "cut_adapter_PE/{sample}_{rn}_R1.fq.gz",
-        "cut_adapter_PE/{sample}_{rn}_R2.fq.gz",
+        TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R1.contamination.fq.gz",
+        TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R2.contamination.fq.gz",
         "prepared_genes/genes.3n.CT.1.ht2" if CUSTOMIZED_GENES else [],
     output:
-        sam=temp("run_mapping_PE/{sample}_{rn}.genes.sam"),
-        fq1=temp("run_mapping_PE/{sample}_{rn}_R1.genes.fq"),
-        fq2=temp("run_mapping_PE/{sample}_{rn}_R2.genes.fq"),
-        summary="run_mapping_PE/{sample}_{rn}.genes.summary",
+        mapped=temp(TEMPDIR / "mapping_unsorted_PE/{sample}_{rn}.genes.bam"),
+        unmapped=temp(TEMPDIR / "mapping_discarded_PE/{sample}_{rn}.genes.bam"),
+        summary="report_reads/mapping/{sample}_{rn}.genes.summary",
     params:
-        un="run_mapping_PE/{sample}_{rn}_R%.genes.fq",
-        hisat3n=config["path"]["hisat3n"],
-        index=REF["genes"]["hisat3n"]
-        if not CUSTOMIZED_GENES
-        else "prepared_genes/genes",
-        mapping="--directional-mapping"
-        if STRANDNESS == "F"
-        else "--directional-mapping-reverse"
-        if STRANDNESS == "R"
-        else "",
+        index=(
+            REF["genes"]["hisat3n"] if not CUSTOMIZED_GENES else "prepared_genes/genes"
+        ),
     threads: 24
-    resources:
-        mem_mb=56000,
     shell:
         """
-        export TMPDIR="/scratch/midway3/yec"
-        {params.hisat3n} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -1 {input[0]} -2 {input[1]} {params.mapping} --all --norc --base-change C,T --mp 8,2 --no-spliced-alignment --un-conc {params.un} -S {output.sam}
+        {BIN[hisat3n]} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -1 {input[0]} -2 {input[1]} --directional-mapping --all --norc --base-change C,T --mp 8,2 --no-spliced-alignment | \
+            {BIN[samtools]} view -@ {threads} -e 'flag.proper_pair && !flag.unmap && !flag.munmap' -O BAM -U {output.unmapped} -o {output.mapped}
         """
 
 
 rule hisat2_3n_mapping_genome_PE:
     input:
-        "run_mapping_PE/{sample}_{rn}_R1.genes.fq",
-        "run_mapping_PE/{sample}_{rn}_R2.genes.fq",
+        TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R1.genes.fq.gz",
+        TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R2.genes.fq.gz",
     output:
-        sam=temp("run_mapping_PE/{sample}_{rn}.genome.sam"),
-        fq1=temp("run_mapping_PE/{sample}_{rn}_R1.genome.fq"),
-        fq2=temp("run_mapping_PE/{sample}_{rn}_R2.genome.fq"),
-        summary="run_mapping_PE/{sample}_{rn}.genome.summary",
+        mapped=temp(TEMPDIR / "mapping_unsorted_PE/{sample}_{rn}.genome.bam"),
+        unmapped=temp(TEMPDIR / "mapping_discarded_PE/{sample}_{rn}.genome.bam"),
+        summary="report_reads/mapping/{sample}_{rn}.genome.summary",
     params:
-        un="run_mapping_PE/{sample}_{rn}_R%.genome.fq",
-        hisat3n=config["path"]["hisat3n"],
         index=REF["genome"]["hisat3n"],
-        mapping="--directional-mapping"
-        if STRANDNESS == "F"
-        else "--directional-mapping-reverse"
-        if STRANDNESS == "R"
-        else "",
     threads: 24
-    resources:
-        mem_mb=56000,
     shell:
         """
-        export TMPDIR="/scratch/midway3/yec"
-        {params.hisat3n} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -1 {input[0]} -2 {input[1]} {params.mapping} --base-change C,T --pen-noncansplice 20 --mp 4,1 --un-conc {params.un} -S {output.sam}
+        {BIN[hisat3n]} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -1 {input[0]} -2 {input[1]} --directional-mapping --base-change C,T --pen-noncansplice 20 --mp 4,1 | \
+            {BIN[samtools]} view -@ {threads} -e 'flag.proper_pair && !flag.unmap && !flag.munmap' -O BAM -U {output.unmapped} -o {output.mapped}
         """
 
 
-rule hisat2_3n_mapping_contamination_PE:
+rule extract_unmap_bam_internal_PE:
     input:
-        "run_mapping_PE/{sample}_{rn}_R1.genome.fq",
-        "run_mapping_PE/{sample}_{rn}_R2.genome.fq",
+        TEMPDIR / "mapping_discarded_PE/{sample}_{rn}.{reftype}.bam",
     output:
-        sam=temp("run_mapping_PE/{sample}_{rn}.contamination.sam"),
-        fq1="run_unmapped_PE/{sample}_{rn}_R1.contamination.fq.gz",
-        fq2="run_unmapped_PE/{sample}_{rn}_R2.contamination.fq.gz",
-        summary="run_mapping_PE/{sample}_{rn}.contamination.summary",
-    params:
-        un="run_unmapped_PE/{sample}_{rn}_R%.contamination.fq.gz",
-        hisat3n=config["path"]["hisat3n"],
-        index=REF["contamination"]["hisat3n"],
-        mapping="--directional-mapping"
-        if STRANDNESS == "F"
-        else "--directional-mapping-reverse"
-        if STRANDNESS == "R"
-        else "",
-    threads: 24
-    resources:
-        mem_mb=56000,
+        r1=temp(TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R1.{reftype}.fq.gz"),
+        r2=temp(TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R2.{reftype}.fq.gz"),
+    # wildcard_constraints: reftype="contamination|genes",
+    threads: 4
     shell:
         """
-        export TMPDIR="/scratch/midway3/yec"
-        {params.hisat3n} --index {params.index} -p {threads} --summary-file {output.summary} --new-summary -q -1 {input[0]} -2 {input[1]} {params.mapping} --base-change C,T --mp 8,2 --no-spliced-alignment --un-conc-gz {params.un} -S {output.sam}
+        {BIN[samtools]} fastq -@ {threads} -1 {output.r1} -2 {output.r2} -0 /dev/null -s /dev/null -n {input}
         """
 
 
-# join SE and PE mapping and sort
+# keep unmap reads
+
+
+ruleorder: extract_unmap_bam_final_PE > extract_unmap_bam_final_SE
+
+
+rule extract_unmap_bam_final_SE:
+    input:
+        r1=TEMPDIR / "unmapped_internal_SE/{sample}_{rn}_R1.genome.fq.gz",
+    output:
+        r1=INTERNALDIR / "discarded_reads/{sample}_{rn}_R1.unmapped.fq.gz",
+    threads: 4
+    shell:
+        """
+        mv {input.r1} {output.r1}
+        """
+
+
+rule extract_unmap_bam_final_PE:
+    input:
+        r1=TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R1.genome.fq.gz",
+        r2=TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R2.genome.fq.gz",
+    output:
+        r1=INTERNALDIR / "discarded_reads/{sample}_{rn}_R1.unmapped.fq.gz",
+        r2=INTERNALDIR / "discarded_reads/{sample}_{rn}_R2.unmapped.fq.gz",
+    threads: 4
+    shell:
+        """
+        mv {input.r1} {output.r1}
+        mv {input.r2} {output.r2}
+        """
+
+
+# sort and keep bam file for each run (for speedup reanalyse)
 
 
 rule hisat2_3n_sort:
     input:
-        "run_mapping_SE/{sample}_{rn}.{ref}.sam",
+        lambda wildcards: TEMPDIR
+        / (
+            "mapping_unsorted_SE/{sample}_{rn}.{ref}.bam"
+            if len(SAMPLE2DATA[wildcards.sample][wildcards.rn]) == 1
+            else "mapping_unsorted_PE/{sample}_{rn}.{ref}.bam"
+        ),
     output:
-        "run_mapping_SE/{sample}_{rn}.{ref}.bam",
-    params:
-        samtools=config["path"]["samtools"],
-    threads: 8
-    resources:
-        mem_mb=40000,
+        INTERNALDIR / "run_sorted/{sample}_{rn}.{ref}.bam",
+    threads: 16
     shell:
         """
-        {params.samtools} view -@ {threads} -F4 -b {input} | {params.samtools} sort -@ {threads} --write-index -m 4G -O BAM -o {output} -
+        {BIN[samtools]} sort -@ {threads} --write-index -m 3G -O BAM -o {output} {input}
         """
-
-
-rule hisat2_3n_sort_PE:
-    input:
-        "run_mapping_PE/{sample}_{rn}.{ref}.sam",
-    output:
-        "run_mapping_PE/{sample}_{rn}.{ref}.bam",
-    params:
-        samtools=config["path"]["samtools"],
-    threads: 8
-    resources:
-        mem_mb=40000,
-    shell:
-        """
-        {params.samtools} view -@ {threads} -F4 -b {input} | {params.samtools} sort -@ {threads} --write-index -m 4G -O BAM -o {output} -
-        """
-
-
-rule join_SE_and_PE_mapping:
-    input:
-        "run_mapping_SE/{sample}_{rn}.{ref}.bam",
-        "run_mapping_PE/{sample}_{rn}.{ref}.bam",
-    output:
-        temp("run_mapping_join_SE_and_PE/{sample}_{rn}.{ref}.bam"),
-    params:
-        samtools=config["path"]["samtools"],
-    threads: 8
-    resources:
-        mem_mb=40000,
-    shell:
-        "{params.samtools} merge -@ {threads} -o {output} {input}"
 
 
 ################################################################################
-
 # combine mapping results (multi run)
+################################################################################
 
 
 rule combine_runs:
     input:
         lambda wildcards: [
-            f"run_mapping_join_SE_and_PE/{wildcards.sample}_{r}.{wildcards.ref}.bam"
-            if len(v2) > 1
-            else f"run_mapping_SE/{wildcards.s}_{r}.{wildcards.ref}.bam"
-            for r, v in sample2data[wildcards.sample].items()
+            INTERNALDIR / f"run_sorted/{wildcards.sample}_{r}.{wildcards.ref}.bam"
+            for r in SAMPLE2DATA[wildcards.sample]
         ],
     output:
-        "combined_mapping/{sample}.{ref}.bam",
+        temp(TEMPDIR / "combined_mapping/{sample}.{ref}.bam"),
     params:
         path_samtools=config["path"]["samtools"],
-    threads: 4
-    resources:
-        mem_mb=16000,
+    threads: 8
     shell:
         "{params.path_samtools} merge -@ {threads} -o {output} {input}"
-
-
-# --input-fmt-option 'filter=[NH]==1'
-
-
-## stat reads
-
-
-rule count_cutadapt_reads:
-    input:
-        lambda wildcards: [
-            os.path.join(x, f"{s}_{r}.cutadapt.step{i}.report")
-            for r, v in sample2data[wildcards.sample].items()
-            for x in (
-                ["cut_adapter_SE", "cut_adapter_PE"]
-                if len(v) > 1
-                else ["cut_adapter_SE"]
-            )
-            for i in [1, 2]
-        ],
-    output:
-        "stat_reads/trimming/{sample}.tsv",
-    params:
-        py=os.path.join(config["src_dir"], "parse_cutadapt_report.py"),
-    shell:
-        """
-        {params.py} {input} >{output}
-        """
-
-
-## stat mapping
 
 
 rule stat_mapping_number:
     input:
         bam=lambda wildcards: [
-            f"combined_mapping/{wildcards.sample}.{ref}.bam" for ref in REFTYPES
+            TEMPDIR / f"combined_mapping/{wildcards.sample}.{ref}.bam"
+            for ref in ["contamination", "genes", "genome"]
         ],
     output:
-        tsv="stat_reads/mapping/{sample}.tsv",
+        tsv="report_reads/mapped/{sample}.tsv",
     params:
-        path_samtools=config["path"]["samtools"],
-        refs=REFTYPES,
+        refs=["contamination", "genes", "genome"],
     threads: 4
-    resources:
-        mem_mb=8000,
     shell:
-        # {params.path_samtools} flagstats -@ {threads} -O tsv $file | awk -v ref="$ref" '{{FS="\\t";OFS="\\t"}}$3 == "mapped"{{t=$1}}$3 == "primary mapped"{{p=$1}}END{{print ref,p; if(t > p)print ref"_multi",t-p}}' >> {output}
         """
         paste <(echo {params.refs} |  tr " " "\\n") <(echo {input.bam} |  tr " " "\\n") | while read ref file; do
-            {params.path_samtools} view -@ {threads} -F 3980 -c $file | awk -v ref="$ref" '{{FS="\\t";OFS="\\t"}}NR==1{{print ref,$1}}' >> {output}
+            {BIN[samtools]} view -@ {threads} -F 3980 -c $file | awk -v ref="$ref" '{{FS="\\t";OFS="\\t"}}NR==1{{print ref,$1}}' >> {output}
         done
         """
 
 
-## remove duplicates
-
-
-rule hisat2_3n_dedup:
+rule dedup_mapping:
     input:
-        bam="combined_mapping/{sample}.{ref}.bam",
+        bam=TEMPDIR / "combined_mapping/{sample}.{ref}.bam",
     output:
-        bam="dedup_mapping/{sample}.{ref}.bam",
-        log="dedup_mapping/{sample}.{ref}.log",
+        bam=INTERNALDIR / "aligned_bam/{sample}.{ref}.bam",
+        txt="report_reads/dedup/{sample}.{ref}.log",
     params:
-        path_umicollapse=config["path"]["umicollapse"],
-    threads: 2
-    resources:
-        mem_mb=40000,
+        tmp=os.environ["TMPDIR"],
+    threads: 20
     run:
-        if LIBRARY_STRATEGY in ["INLINE", "TAKARAV3"]:
+        if WITH_UMI:
             shell(
                 """
-            module load java
-            export TMPDIR="/scratch/midway3/yec"
-            java -server -Xms8G -Xmx36G -Xss100M -Djava.io.tmpdir=/scratch/midway3/yec -jar {params.path_umicollapse} bam \
-                --two-pass -i {input.bam} -o {output.bam}  >{output.log}
+            /software/java-15.0.2-el8-x86_64/bin/java -server -Xms8G -Xmx40G -Xss100M -Djava.io.tmpdir={params.tmp} -jar {BIN[umicollapse]} bam \
+                -t 2 -T {threads} --data naive --merge avgqual --two-pass -i {input.bam} -o {output.bam} >{output.txt}
+            """
+            )
+        elif MARKDUP:
+            shell(
+                """
+                ~/tools/jdk8u322-b06-jre/bin/java -Xmx36G -jar ~/tools/gatk-4.2.5.0/gatk-package-4.2.5.0-local.jar MarkDuplicates \
+                    -I {input} -O {output.bam} -M {output.txt} \
+                    --DUPLICATE_SCORING_STRATEGY SUM_OF_BASE_QUALITIES --REMOVE_DUPLICATES true --VALIDATION_STRINGENCY SILENT --TMP_DIR {params.tmp}
             """
             )
         else:
             shell(
                 """
-                ln -sfr {input.bam} {output.bam}
-                touch {output.log}
+                cp {input.bam} {output.bam}
+                touch {output.txt}
             """
             )
 
 
 rule dedup_index:
     input:
-        bam="dedup_mapping/{sample}.{ref}.bam",
+        bam=INTERNALDIR / "aligned_bam/{sample}.{ref}.bam",
     output:
-        bai="dedup_mapping/{sample}.{ref}.bam.bai",
+        bai=INTERNALDIR / "aligned_bam/{sample}.{ref}.bam.bai",
     threads: 6
-    resources:
-        mem_mb=24000,
     shell:
         """
-        samtools index -@ {threads} {input}
+        {BIN[samtools]} index -@ {threads} {input}
         """
 
 
-########
-
-## call mutation
+####################################
+# call mutation
+####################################
 
 
 rule hisat2_3n_calling_unfiltered_unique:
     input:
-        "dedup_mapping/{sample}.{ref}.bam",
+        INTERNALDIR / "aligned_bam/{sample}.{ref}.bam",
     output:
-        "called_unfiltered/{sample}.{ref}.tsv.gz",
+        temp(TEMPDIR / "unfiltered_unique/{sample}.{ref}.tsv.gz"),
     params:
-        hisat3ntable=config["path"]["hisat3ntable"],
-        samtools=config["path"]["samtools"],
-        fa=lambda wildcards: REF[wildcards.ref]["fa"]
-        if wildcards.ref != "genes" or not CUSTOMIZED_GENES
-        else "prepared_genes/genes.fa",
-    threads: 24
-    resources:
-        mem_mb=48000,
+        fa=lambda wildcards: (
+            REF[wildcards.ref]["fa"]
+            if wildcards.ref != "genes" or not CUSTOMIZED_GENES
+            else "prepared_genes/genes.fa"
+        ),
+    threads: 16
     shell:
+        # ref     pos     strand  convertedBaseQualities  convertedBaseCount      unconvertedBaseQualities        unconvertedBaseCount
         """
-        samtools view -e "rlen<100000" -h {input} | {params.hisat3ntable} -p {threads} -u --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | bgzip -@ {threads} -c > {output}
+        {BIN[samtools]} view -e "rlen<100000" -h {input} | {BIN[hisat3ntable]} -p {threads} -u --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | cut -f 1,2,3,5,7 | bgzip -@ {threads} -c > {output}
         """
-
-
-# Update: previous version only call unique mapping reads
 
 
 rule hisat2_3n_calling_unfiltered_multi:
     input:
-        "dedup_mapping/{sample}.{ref}.bam",
+        INTERNALDIR / "aligned_bam/{sample}.{ref}.bam",
     output:
-        "called_unfiltered_multi/{sample}.{ref}.tsv.gz",
+        temp(TEMPDIR / "unfiltered_multi/{sample}.{ref}.tsv.gz"),
     params:
-        hisat3ntable=config["path"]["hisat3ntable"],
-        samtools=config["path"]["samtools"],
-        fa=lambda wildcards: REF[wildcards.ref]["fa"]
-        if wildcards.ref != "genes" or not CUSTOMIZED_GENES
-        else "prepared_genes/genes.fa",
-    threads: 24
-    resources:
-        mem_mb=48000,
+        fa=lambda wildcards: (
+            REF[wildcards.ref]["fa"]
+            if wildcards.ref != "genes" or not CUSTOMIZED_GENES
+            else "prepared_genes/genes.fa"
+        ),
+    threads: 16
     shell:
-        # Update: previous version only call unique mapping reads
         """
-        samtools view -e "rlen<100000" -h {input} | {params.hisat3ntable} -p {threads} -m --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | bgzip -@ {threads} -c > {output}
+        {BIN[samtools]} view -e "rlen<100000" -h {input} | {BIN[hisat3ntable]} -p {threads} -m --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | cut -f 1,2,3,5,7 | bgzip -@ {threads} -c > {output}
         """
 
 
@@ -851,255 +489,136 @@ rule hisat2_3n_calling_unfiltered_multi:
 
 rule hisat2_3n_filtering:
     input:
-        bam="dedup_mapping/{sample}.{ref}.bam",
+        INTERNALDIR / "aligned_bam/{sample}.{ref}.bam",
     output:
-        converted=temp("hisat_converted/{sample}.{ref}.bam"),
-        # unconverted=temp("hisat_unconverted/{sample}.{ref}.bam"),
-    params:
-        samtools=config["path"]["samtools"],
-    threads: 2
-    resources:
-        mem_mb=6000,
+        temp(TEMPDIR / "hisat_converted/{sample}.{ref}.bam"),
+    threads: 4
     shell:
-        # {params.samtools} view -@ {threads} -e "[XM] * 20 > (qlen-sclen) || [Zf] > 3 || 3 * [Zf] > [Zf] + [Yf]" {input.bam} -O BAM -o {output.unconverted}
         """
-        {params.samtools} view -@ {threads} -e "[XM] * 20 <= (qlen-sclen) && [Zf] <= 3 && 3 * [Zf] <= [Zf] + [Yf]" {input.bam} -O BAM -o {output.converted}
+        {BIN[samtools]} view -@ {threads} -e "[XM] * 20 <= (qlen-sclen) && [Zf] <= 3 && 3 * [Zf] <= [Zf] + [Yf]" {input} -O BAM -o {output}
         """
 
 
 rule hisat2_3n_calling_filtered_unqiue:
     input:
-        "hisat_converted/{sample}.{ref}.bam",
+        TEMPDIR / "hisat_converted/{sample}.{ref}.bam",
     output:
-        "called_filtered/{sample}.{ref}.tsv.gz",
+        temp(TEMPDIR / "filtered_unique/{sample}.{ref}.tsv.gz"),
     params:
-        hisat3ntable=config["path"]["hisat3ntable"],
-        samtools=config["path"]["samtools"],
-        fa=lambda wildcards: REF[wildcards.ref]["fa"]
-        if wildcards.ref != "genes" or not CUSTOMIZED_GENES
-        else "prepared_genes/genes.fa",
-    threads: 24
-    resources:
-        mem_mb=48000,
+        fa=lambda wildcards: (
+            REF[wildcards.ref]["fa"]
+            if wildcards.ref != "genes" or not CUSTOMIZED_GENES
+            else "prepared_genes/genes.fa"
+        ),
+    threads: 16
     shell:
         """
-        samtools view -e "rlen<100000" -h {input} | {params.hisat3ntable} -p {threads} -u --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | bgzip -@ {threads} -c > {output}
+        {BIN[samtools]} view -e "rlen<100000" -h {input} | {BIN[hisat3ntable]} -p {threads} -u --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | cut -f 1,2,3,5,7 | bgzip -@ {threads} -c > {output}
         """
 
 
-# Update: previous version only call unique mapping reads
 rule hisat2_3n_calling_filtered_multi:
     input:
-        "hisat_converted/{sample}.{ref}.bam",
+        TEMPDIR / "hisat_converted/{sample}.{ref}.bam",
     output:
-        "called_filtered_multi/{sample}.{ref}.tsv.gz",
+        temp(TEMPDIR / "filtered_multi/{sample}.{ref}.tsv.gz"),
     params:
-        hisat3ntable=config["path"]["hisat3ntable"],
-        samtools=config["path"]["samtools"],
-        fa=lambda wildcards: REF[wildcards.ref]["fa"]
-        if wildcards.ref != "genes" or not CUSTOMIZED_GENES
-        else "prepared_genes/genes.fa",
-    threads: 24
-    resources:
-        mem_mb=48000,
-    shell:
-        """
-        samtools view -e "rlen<100000" -h {input} | {params.hisat3ntable} -p {threads} -m --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | bgzip -@ {threads} -c > {output}
-        """
-
-
-## calculate methy rate
-
-
-rule calculate_methylation_rate:
-    input:
-        expand(
-            "called_{{is_filtered}}/{sample}.{{ref}}.tsv.gz",
-            sample=sample2data.keys(),
+        fa=lambda wildcards: (
+            REF[wildcards.ref]["fa"]
+            if wildcards.ref != "genes" or not CUSTOMIZED_GENES
+            else "prepared_genes/genes.fa"
         ),
-    output:
-        "calculated_rate/{ref}_{is_filtered}.tsv.gz",
-    threads: 4
-    resources:
-        mem_mb=8000,
+    threads: 16
     shell:
         """
-        (
-        echo -e "Sample\\tChrom\\tPos\\tStrand\\tUnconverted\\tDepth\\tRatio"
-        for file in {input}; do
-            sample=`basename $file | cut -d. -f1`
-            zcat $file | awk -v samplename="$sample" 'BEGIN{{FS="\\t"; OFS="\\t"}} NR > 1 {{ print samplename,$1,$2,$3,$7,$7+$5,$7/($7+$5) }}'
-        done
-        ) | bgzip -@ {threads} -c > {output}
+        {BIN[samtools]} view -e "rlen<100000" -h {input} | {BIN[hisat3ntable]} -p {threads} -m --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | cut -f 1,2,3,5,7 | bgzip -@ {threads} -c > {output}
         """
 
 
-## picked sites and merge table
-
-
-rule select_called_sites:
+rule join_pileup:
     input:
-        # in paries
         lambda wildcards: [
-            f"{t}/{s}.{wildcards.ref}.tsv.gz"
-            for s in group2sample[wildcards.group]
-            for t in ["called_filtered", "called_filtered_multi"]
+            TEMPDIR / f"{t}/{wildcards.sample}.{wildcards.ref}.tsv.gz"
+            for t in [
+                "unfiltered_unique",
+                "unfiltered_multi",
+                "filtered_unique",
+                "filtered_multi",
+            ]
         ],
     output:
-        "selected_sites/{group}_{ref}.tsv.gz",
-    params:
-        # AVERAGE_DEPTH = 10
-        # AVERAGE_RATIO = 0.02
-        # TOTAL_SUPPORT = 3
-        py=os.path.join(config["src_dir"], "select_called_sites_v3.py"),
-    threads: 4
-    resources:
-        mem_mb=160000,
+        INTERNALDIR / "count_sites/{sample}.{ref}.arrow",
+    threads: 6
     shell:
+        # "ref", "pos", "strand",
+        # "convertedBaseCount_unfiltered_uniq",
+        # "unconvertedBaseCount_unfiltered_uniq",
+        # "convertedBaseCount_unfiltered_multi",
+        # "unconvertedBaseCount_unfiltered_multi",
+        # "convertedBaseCount_filtered_uniq",
+        # "unconvertedBaseCount_filtered_uniq",
+        # "convertedBaseCount_filtered_multi",
+        # "unconvertedBaseCount_filtered_multi",
         """
-        {params.py} {output} {input}
+        {BIN[join_pileup.py]} -i {input} -o {output}
         """
+
+
+rule group_pileup:
+    input:
+        lambda wildcards: [
+            INTERNALDIR / f"count_sites/{sample}.{wildcards.ref}.arrow"
+            for sample in GROUP2SAMPLE[wildcards.group]
+        ],
+    output:
+        INTERNALDIR / "group_sites/{group}.{ref}.arrow",
+    threads: 6
+    shell:
+        # u: total unconverted count of unique filtered
+        # d: total depth of unique filtered
+        # ur: average unconverted ratio of unique filtered
+        # mr: average multiple mapped ratio of unfiltered
+        # cr: average cluster ratio of all
+        # 
+        # u_sample1: ...
+        # d_sample1: ...
+        # u_sample2: ...
+        # d_sample2: ...
+        # ...
+        """
+        {BIN[group_pileup.py]} -i {input} -o {output}
+        """
+
+
+# prefilter sites and merge table
 
 
 rule combined_select_sites:
     input:
         expand(
-            "selected_sites/{group}_{{ref}}.tsv.gz",
-            group=group2sample.keys(),
+            INTERNALDIR / "group_sites/{group}.{{ref}}.arrow",
+            group=GROUP2SAMPLE.keys(),
         ),
     output:
-        "combined_sites/{ref}.tsv.gz",
-    params:
-        py=os.path.join(config["src_dir"], "combined_selected_sites.py"),
-    resources:
-        mem_mb=4000,
+        "detected_sites/prefilter/{ref}.tsv",
     shell:
         """
-        {params.py} {output} {input}
+        {BIN[select_sites.py]} -i {input} -o {output}
         """
 
 
-# pick background sites
-
-
-rule pick_background_sites:
-    input:
-        call="called_filtered/{sample}.{ref}.tsv.gz",
-        site="combined_sites/{ref}.tsv.gz",
-    output:
-        "picked_background/{sample}.{ref}.tsv.gz",
-    shell:
-        """
-        zcat {input.call} | \
-        awk 'BEGIN{{FS="\\t";OFS="\\t";print "Chrom", "Pos", "Strand", "Unconverted", "Depth"}} $5+$7>5{{print $1,$2,$3,$7,$5+$7}}' | \
-        grep -w -F -v -f <(zcat {input.site} | cut -f 1-3) |\
-        bgzip -c > {output}
-        """
-
-
-rule sumup_background_sites_by_group:
-    input:
-        # in paries
-        lambda wildcards: [
-            f"picked_background/{s}.{wildcards.ref}.tsv.gz"
-            for s in group2sample[wildcards.group]
-        ],
-    output:
-        "sumup_background/{group}_{ref}.tsv.gz",
-    params:
-        py=os.path.join(config["src_dir"], "sumup_background_ratio.py"),
-    threads: 4
-    resources:
-        mem_mb=16000,
-    shell:
-        """
-        {params.py} {output} {input}
-        """
-
-
-rule combined_background_sites:
-    input:
-        expand(
-            "sumup_background/{group}_{{ref}}.tsv.gz",
-            group=group2sample.keys(),
-        ),
-    output:
-        "combined_background_by_group/{ref}.tsv.gz",
-    resources:
-        mem_mb=4000,
-    shell:
-        """
-        echo {input} |  tr " " "\\n" | while read file; do
-            sample=`basename $file | cut -d. -f1`
-            zcat $file | awk -v sample="$sample" 'BEGIN{{FS="\\t";OFS="\\t"}}NR>1{{a+=$4;b+=$5}}END{{print sample,a,b,a/b}}' | bgzip -c >> {output}
-        done
-        """
+# pick putative sites by sample
 
 
 rule stat_sample_background:
     input:
-        expand("picked_background/{sample}.{{ref}}.tsv.gz", sample=sample2data.keys()),
+        site=INTERNALDIR / "count_sites/{sample}.{ref}.arrow",
+        mask="detected_sites/prefilter/{ref}.tsv",
     output:
-        "combined_background/{ref}.tsv.gz",
-    resources:
-        mem_mb=4000,
+        background="detected_sites/background/{sample}.{ref}.tsv",
+        filtered="detected_sites/filtered/{sample}.{ref}.tsv",
+    threads: 2
     shell:
         """
-        echo {input} |  tr " " "\\n" | while read file; do
-            sample=`basename $file | cut -d. -f1`
-            zcat $file | awk -v sample="$sample" 'BEGIN{{FS="\\t";OFS="\\t"}}NR>1{{a+=$4;b+=$5}}END{{print sample,a,b,a/b}}' | bgzip -c >> {output}
-        done
-        """
-
-
-# pick putative sites
-
-
-rule annotate_combined_sites:
-    input:
-        "combined_sites/{ref}.tsv.gz",
-    output:
-        "annotated_table/{ref}.tsv.gz",
-    # params:
-    # py=os.path.join(config["src_dir"], "annotate_merged_table.py"),
-    resources:
-        mem_mb=10000,
-    shell:
-        # variant version >= 0.0.36
-        """
-        zcat {input} | variant-effect -r {SPECIES} -s -H -c 1,2,3 | gzip -c > {output}
-        """
-
-
-rule merge_raw_data_to_sites:
-    input:
-        sites="annotated_table/{ref}.tsv.gz",
-        raw=lambda wildcards: [
-            f"{t}/{s}.{wildcards.ref}.tsv.gz"
-            for s in sample2data.keys()
-            for t in ["called_filtered", "called_filtered_multi"]
-        ],
-    output:
-        "merged_table/{ref}.tsv.gz",
-    params:
-        py=os.path.join(config["src_dir"], "join_raw_table_v2.py"),
-    resources:
-        mem_mb=40000,
-    shell:
-        """
-        {params.py} {output} {input.sites} {input.raw}
-        """
-
-
-rule filter_sites:
-    input:
-        table="merged_table/{ref}.tsv.gz",
-        bg="combined_background/{ref}.tsv.gz",
-    output:
-        "filtered_table/{ref}.tsv.gz",
-    params:
-        py=os.path.join(config["src_dir"], "filter_table_by_pvalue.py"),
-    shell:
-        """
-        {params.py} -b {input.bg} -i {input.table} -o {output}
+        {BIN[filter_sites.py]} -i {input.site} -m {input.mask} -b {output.background} -o {output.filtered}
         """
