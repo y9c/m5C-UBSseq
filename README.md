@@ -8,7 +8,7 @@
 
 ## workflow
 
-![](./docs/flow.svg)
+[![](./docs/flow.svg)](./docs/flow.svg)
 
 ## Citation
 
