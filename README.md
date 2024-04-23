@@ -8,7 +8,7 @@
 
 ## workflow
 
-<img src="./docs/flow.svg" width="100%" height="100%">
+[![](./docs/flow.svg)](https://github.com/y9c/m5C-UBSseq)
 
 ## Citation
 
