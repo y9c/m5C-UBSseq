@@ -1,3 +1,4 @@
+# tools and scripts
 path:
   samtools: /path/to/samtools
   hisat3n: /path/to/hisat-3n
@@ -7,6 +8,18 @@ path:
   select_sites.py: ../bin/select_sites.py
   filter_sites.py: ../bin/filter_sites.py
 
+# global config
+#
+# prepare genes index
+# premap to rRNA, tRNA and other small RNA
+# If study virus, then also premap to virus genome
+# customized_genes:
+#   - a.fa
+#   - b.fa
+# library: INLINE
+# makedup: false
+
+# reference genome and index
 reference:
   contamination:
     fa: ~/reference/genome/contamination/contamination.fa

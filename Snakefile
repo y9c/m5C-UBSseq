@@ -63,10 +63,6 @@ rule all:
             sample=SAMPLE2DATA.keys(),
             ref=["genes", "genome"],
         ),
-        # expand("prefilter_sites_combined/{ref}.tsv", ref=["genes", "genome"]),
-
-
-# cut adapter
 
 
 rule cutadapt_SE:
@@ -113,11 +109,6 @@ rule cutadapt_PE:
         """
 
 
-# prepare genes index
-# premap to rRNA, tRNA and other small RNA
-# If study virus, then also premap to virus genome
-
-
 rule prepare_genes_index:
     input:
         CUSTOMIZED_GENES,
@@ -157,9 +148,7 @@ rule generate_saf_gene:
         """
 
 
-################################
 # Mapping (SE mapping mode)
-################################
 
 
 rule hisat2_3n_mapping_contamination_SE:
@@ -228,9 +217,7 @@ rule extract_unmap_bam_internal_SE:
         """
 
 
-################################
 # Mapping (PE mapping mode)
-################################
 
 
 rule hisat2_3n_mapping_contamination_PE:
@@ -296,15 +283,11 @@ rule extract_unmap_bam_internal_PE:
     output:
         r1=temp(TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R1.{reftype}.fq.gz"),
         r2=temp(TEMPDIR / "unmapped_internal_PE/{sample}_{rn}_R2.{reftype}.fq.gz"),
-    # wildcard_constraints: reftype="contamination|genes",
     threads: 4
     shell:
         """
         {BIN[samtools]} fastq -@ {threads} -1 {output.r1} -2 {output.r2} -0 /dev/null -s /dev/null -n {input}
         """
-
-
-# keep unmap reads
 
 
 ruleorder: extract_unmap_bam_final_PE > extract_unmap_bam_final_SE
@@ -337,9 +320,6 @@ rule extract_unmap_bam_final_PE:
         """
 
 
-# sort and keep bam file for each run (for speedup reanalyse)
-
-
 rule hisat2_3n_sort:
     input:
         lambda wildcards: TEMPDIR
@@ -357,9 +337,7 @@ rule hisat2_3n_sort:
         """
 
 
-################################################################################
 # combine mapping results (multi run)
-################################################################################
 
 
 rule combine_runs:
@@ -417,8 +395,7 @@ rule dedup_mapping:
             shell(
                 """
                 ~/tools/jdk8u322-b06-jre/bin/java -Xmx36G -jar ~/tools/gatk-4.2.5.0/gatk-package-4.2.5.0-local.jar MarkDuplicates \
-                    -I {input} -O {output.bam} -M {output.txt} \
-                    --DUPLICATE_SCORING_STRATEGY SUM_OF_BASE_QUALITIES --REMOVE_DUPLICATES true --VALIDATION_STRINGENCY SILENT --TMP_DIR {params.tmp}
+                    -I {input} -O {output.bam} -M {output.txt} --DUPLICATE_SCORING_STRATEGY SUM_OF_BASE_QUALITIES --REMOVE_DUPLICATES true --VALIDATION_STRINGENCY SILENT --TMP_DIR {params.tmp}
             """
             )
         else:
@@ -442,9 +419,7 @@ rule dedup_index:
         """
 
 
-####################################
 # call mutation
-####################################
 
 
 rule hisat2_3n_calling_unfiltered_unique:
@@ -460,7 +435,6 @@ rule hisat2_3n_calling_unfiltered_unique:
         ),
     threads: 16
     shell:
-        # ref     pos     strand  convertedBaseQualities  convertedBaseCount      unconvertedBaseQualities        unconvertedBaseCount
         """
         {BIN[samtools]} view -e "rlen<100000" -h {input} | {BIN[hisat3ntable]} -p {threads} -u --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | cut -f 1,2,3,5,7 | bgzip -@ {threads} -c > {output}
         """
@@ -482,9 +456,6 @@ rule hisat2_3n_calling_unfiltered_multi:
         """
         {BIN[samtools]} view -e "rlen<100000" -h {input} | {BIN[hisat3ntable]} -p {threads} -m --alignments - --ref {params.fa} --output-name /dev/stdout --base-change C,T | cut -f 1,2,3,5,7 | bgzip -@ {threads} -c > {output}
         """
-
-
-## filter cluster effect and call mutation
 
 
 rule hisat2_3n_filtering:
@@ -550,15 +521,6 @@ rule join_pileup:
         INTERNALDIR / "count_sites/{sample}.{ref}.arrow",
     threads: 6
     shell:
-        # "ref", "pos", "strand",
-        # "convertedBaseCount_unfiltered_uniq",
-        # "unconvertedBaseCount_unfiltered_uniq",
-        # "convertedBaseCount_unfiltered_multi",
-        # "unconvertedBaseCount_unfiltered_multi",
-        # "convertedBaseCount_filtered_uniq",
-        # "unconvertedBaseCount_filtered_uniq",
-        # "convertedBaseCount_filtered_multi",
-        # "unconvertedBaseCount_filtered_multi",
         """
         {BIN[join_pileup.py]} -i {input} -o {output}
         """
@@ -574,23 +536,9 @@ rule group_pileup:
         INTERNALDIR / "group_sites/{group}.{ref}.arrow",
     threads: 6
     shell:
-        # u: total unconverted count of unique filtered
-        # d: total depth of unique filtered
-        # ur: average unconverted ratio of unique filtered
-        # mr: average multiple mapped ratio of unfiltered
-        # cr: average cluster ratio of all
-        # 
-        # u_sample1: ...
-        # d_sample1: ...
-        # u_sample2: ...
-        # d_sample2: ...
-        # ...
         """
         {BIN[group_pileup.py]} -i {input} -o {output}
         """
-
-
-# prefilter sites and merge table
 
 
 rule combined_select_sites:
@@ -605,9 +553,6 @@ rule combined_select_sites:
         """
         {BIN[select_sites.py]} -i {input} -o {output}
         """
-
-
-# pick putative sites by sample
 
 
 rule stat_sample_background:
